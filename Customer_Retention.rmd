@@ -1,0 +1,677 @@
+---
+title: "Customer Churn Prediction"
+author: "Daniel Plotkin"
+date: "2022-11-28"
+output: rmdformats::readthedown
+---
+
+# Synopsis
+
+In telecommunications, a big part of customer relationship management involves efforts to retain existing customers. In many cases, the costs incurred to attract new customers are much larger than the costs to retain the existing customers.
+
+This project is focused on creating the best model to predict customer churn to help us make decisions on what incentives we can give to customers planning to churn.
+
+We will do this by:
+
+1.  Cleaning our data set.
+2.  Exploring trends through data analysis/data visualization.
+3.  Creating and evaluating model performance.
+4.  Exploring trends within the optimal model.
+
+# Libraries
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(here)
+library(vip)
+library(pdp)
+library(DT)
+library(ggplot2)
+library(cowplot)
+library(DALEXtra)
+```
+
+# Data Exploration
+
+Below we are going to look into the structure of our data set.
+
+```{r, message=FALSE}
+path <- here('data', 'customer_retention.csv')
+df <- read_csv(path)
+
+
+datatable(head(df))
+```
+
+```{r}
+str(df)
+```
+
+## About the Data
+
+Below are our feature variables ($X$):
+
+-   *Gender*: Whether the customer is a male or a female
+
+-   *SeniorCitizen*: Whether the customer is a senior citizen or not (1, 0)
+
+-   *Partner*: Whether the customer has a partner or not (Yes, No)
+
+-   *Dependents*: Whether the customer has dependents or not (Yes, No)
+
+-   *Tenure*: Number of months the customer has stayed with the company
+
+-   *PhoneService*: Whether the customer has a phone service or not (Yes, No)
+
+-   *MultipleLines*: Whether the customer has multiple lines or not (Yes, No, No phone service)
+
+-   *InternetService*: Customer's internet service provider (DSL, Fiber optic, No)
+
+-   *OnlineSecurity*: Whether the customer has online security or not (Yes, No, No internet service)
+
+-   *OnlineBackup*: Whether the customer has online backup or not (Yes, No, No internet service)
+
+-   *DeviceProtection*: Whether the customer has device protection or not (Yes, No, No internet service)
+
+-   *TechSupport*: Whether the customer has tech support or not (Yes, No, No internet service)
+
+-   *StreamingTV*: Whether the customer has streaming TV or not (Yes, No, No internet service)
+
+-   *StreamingMovies*: Whether the customer has streaming movies or not (Yes, No, No internet service)
+
+-   *Contract*: The contract term of the customer (Month-to-month, One year, Two year)
+
+-   *PaperlessBilling*: Whether the customer has paperless billing or not (Yes, No)
+
+-   *PaymentMethod*: The customer's payment method (Electronic check, Mailed check, Bank transfer (automatic), Credit card (automatic))
+
+-   *MonthlyCharges*: The amount charged to the customer monthly
+
+-   *TotalCharges*: The total amount charged to the customer
+
+Below is our response variable ($Y$):
+
+-   *Status*: Whether the customer is Current or has Left.
+
+Checking for nulls:
+
+```{r}
+colSums(is.na(df))
+```
+
+Removing nulls:
+
+```{r}
+df <- na.omit(df)
+colSums(is.na(df))
+```
+
+Data Types:
+
+```{r}
+df %>% map(class)
+```
+
+We are going to convert our binary feature *SeniorCitizen* to a character for our analysis:
+
+```{r}
+df$SeniorCitizen[df$SeniorCitizen == 0] <- 'No'
+df$SeniorCitizen[df$SeniorCitizen == 1] <- 'Yes'
+```
+
+# Exploratory Data Analysis
+
+In this section, we are going to look at our data distributions and correlations among features with each other and features with our $Y$.
+
+## Distributions
+
+Below we are going to look at the distributions for our $Y$:
+
+```{r}
+# function for plotting distribution
+cat_distribution <- function(x) {
+  
+  col = df[[x]]
+  
+  ggplot() +
+    geom_bar(aes(col, fill = df[['Status']])) +
+    labs(
+      title = paste(x, 'Distribution'),
+      fill = 'Status',
+      x = x,
+      y = 'Count'
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      axis.text.x = element_text(size = 6)
+      )
+}
+```
+
+```{r}
+cat_distribution('Status')
+```
+
+Now we are going to quickly look at our distributions for our categorical features:
+
+```{r}
+cat_features <- colnames(
+  df %>%
+  select_if(is.character) %>%
+  select(-Status)
+  )
+
+df$PaymentMethod[df$PaymentMethod == "Bank transfer (automatic)"] <- "Bank transfer"
+
+df$PaymentMethod[df$PaymentMethod == "Credit card (automatic)"] <- "Credit card"
+
+plot_list <- map(cat_features, cat_distribution)
+plot_grid(plotlist = plot_list[1:4])
+```
+
+```{r}
+plot_grid(plotlist = plot_list[5:8])
+```
+
+```{r}
+plot_grid(plotlist = plot_list[9:12])
+```
+
+```{r}
+plot_grid(plotlist = plot_list[13:16])
+```
+
+Now we are going to look at our numeric distributions:
+
+```{r}
+num_distribution <- function(y) {
+  
+  x = df[['Status']]
+  var = df[[y]]
+  
+  ggplot() +
+    geom_boxplot(aes(x, var, fill = x)) +
+    labs(
+      title = paste(y, "Distribution"),
+      x = "Status",
+      y = y,
+      fill = 'Status'
+    ) +
+    theme(plot.title = element_text(hjust = 0.5)) 
+}
+```
+
+```{r}
+num_features <- colnames(
+  df %>%
+    select_if(is.numeric)
+)
+
+for (i in 1:length(num_features)) {
+  col = num_features[i]
+  print(num_distribution(col))
+}
+```
+
+Some interesting insights we can make from looking at our distributions are:
+
+-   Customers who leave are leaving at a short period of time after signing up while current customers stay for a long time.
+
+-   Customers who are charged more in total were staying with the company longer.
+
+-   Customers who payed with electronic checks were more likely to leave.
+
+-   Customers who had month-to-month contracts were more likely to leave.
+
+## Correlation Matrix
+
+```{r}
+df_cor <- df %>%
+  select_if(is.numeric)
+
+corrplot::corrplot(cor(df_cor))
+```
+
+There is a strong positive correlation between:
+
+-   Tenure and Total Charges
+
+-   Total Charges and Monthly Charges
+
+Below we are going to look at Tenure by each payment method:
+
+```{r}
+ggplot(df) +
+  geom_boxplot(aes(x = PaymentMethod, y = Tenure, fill = PaymentMethod)) +
+  labs(
+    title = 'Tenure by Payment Method'
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+    ) +
+  facet_wrap(vars(Status))
+```
+
+We can see that customers who payed with credit card or a bank transfer were more likely to stay around longer.
+
+```{r, message=FALSE, warning=FALSE}
+ggplot(df) +
+  geom_point(aes(y = Tenure, x = MonthlyCharges, color = InternetService)) +
+  geom_smooth(
+    aes(y = Tenure, x = MonthlyCharges), fill = 'brown'
+    ) +
+  labs(
+    title = 'Tenure by Monthly Charges'
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+    ) 
+```
+
+From the chart above, we can see that:
+
+-   Fiber optic is the most expensive monthly internet service.
+
+-   Customers who payed more monthly for internet service stayed around longer.
+
+# Data Processing
+
+Lets create our train/test split and apply feature engineering steps to our $X$.
+
+## Factoring Categorical Columns
+
+```{r}
+df <- df %>%
+  mutate_if(is.character, as.factor)
+
+fct_cols <- select_if(df, is.factor)
+map(fct_cols, levels)
+```
+
+## Train/Test Split
+
+```{r}
+set.seed(123)
+split <- initial_split(df, prop = 0.8, strata = Status)
+train <- training(split)
+test <- testing(split)
+
+cv <- vfold_cv(train, v = 10, strata = Status)
+
+cat('Training Shape:', paste0(dim(train), collapse = ','))
+```
+
+```{r}
+cat('Testing Shape:', paste0(dim(test), collapse = ','))
+```
+
+Training data preview:
+
+```{r}
+datatable(head(train))
+```
+
+## Feature Engineering
+
+```{r}
+preprocessor <- recipe(Status ~ ., data = train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_YeoJohnson(all_numeric_predictors())
+```
+
+# Modeling
+
+We are going to test 3 different algorithms:
+
+-   Random Forest
+
+-   KNN
+
+-   Gradient Boost
+
+The model with the highest cross validated AUC will be used to predict future decisions.
+
+## Random Forest
+
+```{r}
+rf <- rand_forest(
+  mode = 'classification',
+  trees = 250,
+  mtry = 4,
+  min_n = tune()
+) %>%
+  set_engine(engine = 'ranger')
+
+rf_grid <- grid_regular(
+  min_n(c(10, 20)),
+  levels = 5
+)
+
+doParallel::registerDoParallel()
+set.seed(123)
+
+tune_rf <- tune_grid(
+  rf,
+  preprocessor,
+  resamples = cv,
+  grid = rf_grid,
+  control = control_resamples(save_pred = T)
+)
+
+show_best(tune_rf, metric = 'roc_auc')
+```
+
+Lets get our CV metrics with the best hyper parameters:
+
+```{r}
+cross_val_score <- function(results, model) {
+  
+  best_params <- select_best(results, metric = 'roc_auc')
+  
+  mdl <- workflow() %>%
+    add_model(model) %>%
+    add_recipe(preprocessor) %>%
+    finalize_workflow(best_params)
+    
+  set.seed(123)
+  cv_scores <- mdl %>% 
+  fit_resamples(cv) %>%
+  collect_metrics()
+  
+  return(cv_scores)
+  
+}
+```
+
+```{r}
+rf_score <- cross_val_score(tune_rf, rf)
+rf_score
+```
+
+Confusion matrix for our cross validated procedure:
+
+```{r}
+conf_mat_resampled(
+  tune_rf,
+  select_best(tune_rf, metric = 'roc_auc'),
+  tidy = F
+  )
+```
+
+## KNN
+
+```{r}
+knn <- nearest_neighbor(
+  mode = 'classification',
+  engine = 'kknn',
+  neighbors = tune(),
+  weight_func = 'rectangular'
+)
+
+knn_params <- grid_regular(
+  neighbors(range = c(1, 101)),
+  levels = 10
+)
+
+doParallel::registerDoParallel()
+set.seed(123)
+
+knn_grid_search <- tune_grid(
+  knn, 
+  preprocessor, 
+  cv, 
+  grid = knn_params, 
+  control = control_resamples(save_pred = T)
+  )
+
+show_best(knn_grid_search, metric = 'roc_auc')
+```
+
+```{r}
+knn_score <- cross_val_score(knn_grid_search, knn)
+knn_score
+```
+
+Confusion matrix for our cross validated procedure:
+
+```{r}
+conf_mat_resampled(
+  knn_grid_search,
+  select_best(knn_grid_search, metric = 'roc_auc'),
+  tidy = F
+  )
+```
+
+## Gradient Boost
+
+```{r}
+boost <- boost_tree(
+  mode = 'classification',
+  engine = "xgboost",
+  trees = 250,
+  mtry = tune(),
+  learn_rate = tune(),
+  tree_depth = tune(),
+  loss_reduction = tune(),                     
+  sample_size = tune()
+    )
+
+boost_params <- grid_latin_hypercube(
+  tree_depth(),
+  finalize(mtry(), train),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  learn_rate(),
+  size = 30
+)
+
+doParallel::registerDoParallel()
+set.seed(123)
+
+tune_boost <- tune_grid(
+  boost,
+  preprocessor,
+  resamples = cv,
+  grid = boost_params,
+  control = control_resamples(save_pred = T)
+)
+```
+
+```{r}
+show_best(tune_boost, metric = 'roc_auc')
+```
+
+```{r}
+boost_score <- cross_val_score(tune_boost, boost)
+boost_score
+```
+
+Confusion matrix for our cross validated procedure:
+
+```{r}
+conf_mat_resampled(
+  tune_boost,
+  select_best(tune_boost, metric = 'roc_auc'),
+  tidy = F
+  )
+```
+
+```{r}
+# function for getting metrics
+get_metric <- function(model_score, metric) {
+  score <- model_score %>%
+    filter(.metric == metric)
+  
+  return(score$mean)
+}
+```
+
+# Results
+
+We are going to first get our accuracy scores from each model:
+
+```{r}
+scores <- list(rf_score, knn_score, boost_score)
+
+accuracy_scores <- c()
+
+for (x in scores) {
+  val <- get_metric(model_score = x, metric = 'accuracy')
+  accuracy_scores[[length(accuracy_scores) + 1]] <- val
+}
+
+accuracy_scores <- unlist(accuracy_scores, use.names = FALSE)
+```
+
+Now we are going to get our AUC scores from our models:
+
+```{r}
+roc_auc_scores = c()
+
+for (x in scores) {
+  val <- get_metric(model_score = x, metric = 'roc_auc')
+  roc_auc_scores[[length(roc_auc_scores) + 1]] <- val
+}
+
+roc_auc_scores <- unlist(roc_auc_scores, use.names = FALSE)
+```
+
+Below we are going to plot our model performances:
+
+```{r}
+results_df <- data.frame(
+  model = rep(c('Random Forest', 'KNN', "Boost"), times = ),
+  metric = rep(c('accuracy', 'roc_auc'), each = 3),
+  cv_score = c(accuracy_scores, roc_auc_scores)
+)
+
+ggplot(results_df, aes(x = model, y = cv_score, fill = metric)) +
+  geom_col(position = 'dodge') +
+  coord_flip() +
+  ylim(0, 1) +
+  geom_text(
+    label = round(results_df$cv_score, digits = 3),
+    position = position_dodge(width = .9),
+    hjust = -0.25,
+    size = 2
+    ) +
+  labs(
+    title = 'Model Peformance'
+  ) +
+  theme(
+    plot.title = element_text(hjust = 0.5)
+  )
+```
+
+Above we can see that our Boosting and Random Forest models performed just as well as each other, with our Gradient Boost model having just a tiny bit better AUC score of **85.2% (80.4% accuracy).**
+
+# Testing Best Model
+
+Below we are going to test our Gradient Boost model on unseen data:
+
+```{r}
+boost_wf <- workflow() %>%
+  add_recipe(preprocessor) %>%
+  add_model(boost) %>%
+  finalize_workflow(select_best(tune_boost, metric = 'roc_auc'))
+
+boost_fit <- boost_wf %>%
+  fit(data = train)
+
+set.seed(123)
+prediction <- boost_fit %>%
+  predict(test) %>%
+  bind_cols(select(test, Status))
+
+conf_mat <- prediction %>%
+  conf_mat(Status, .pred_class)
+
+acc <- prediction %>%
+  accuracy(Status, .pred_class)
+```
+
+## Metrics
+
+```{r}
+# Accuracy
+acc
+```
+
+```{r}
+# Confusion Matrix
+conf_mat
+```
+
+We can see that most of our inefficiencies in our model came from False Positives that they are still current. Below is the feature importance plot for this graph:
+
+```{r}
+boost_fit %>%
+  extract_fit_parsnip() %>%
+  vip() 
+```
+
+Two Year Contracts, Tenure, and Total Charges were the most important features in the Boost Model. As we saw in our data analysis, loyal customers with a two year contract are most likely not to churn than any other contract.
+
+Below we will look at the partial dependencies for *Tenure* and *TotalCharges*:
+
+```{r}
+predict_plot <- function(var, model) {
+  explainer_lg <- explain_tidymodels(
+    model,
+    data = select(train, -Status),
+    y = as.integer(train$Status)
+  )
+  
+  pdp <- model_profile(
+    explainer = explainer_lg,
+    variables = var,
+    N = NULL
+  )
+  
+  pdp_df <- as_tibble(pdp$agr_profiles)
+  print(
+  ggplot(pdp_df, aes(x = `_x_`, y = `_yhat_`)) +
+    geom_smooth(color = 'lightblue', se = F) +
+    ylim(0, 1) +
+    labs(
+      title = paste(str_to_title(var), 'Partial Prediction'),
+      x = var
+    ) +
+    theme_dark() +
+    theme(plot.title = element_text(hjust = 0.5))
+  )
+}
+```
+
+```{r, message=FALSE}
+predict_plot(var = 'Tenure', model = boost_fit)
+```
+
+The longer one stays with the company, the less likely they are to churn.
+
+```{r, message=FALSE}
+predict_plot('TotalCharges', boost_fit)
+```
+
+The higher the total charges, the less one is to churn, signifying loyalty to the company to stay around longer.
+
+# Moving Forward
+
+From our model, we understand that customers who stick around longer tend to stay with the company, meaning most customers churn very shortly after signing up rather than if they stay for a long time.
+
+An approach we can take to retain churning customers is offering a pipeline into them somehow purchasing a year to year contract. This can include:
+
+-   Making a full year subscription payment cheaper than 12 months of a month to month subscription.
+
+    -   An example would be a monthly subscription to be \$12 a month and a year subscription would be \$120, saving the customer \$24 a year, as well as retaining them for longer.
+
+-   Fiber Optic was the most expensive internet service, but it retained the most loyal customers. Increasing marketing ads for Fiber Optic would be a good idea.
+
+    -   Maybe offering free trials for new users, eventually pipe-lining them into purchasing a Fiber Optic plan.
+
+-   Promoting Bank Transfer and Credit Card payment methods.
+
+    -   This can be done through creating easy ways someone can put in bank information into their first payment, and keeping this data in a database for easy future payments.
